@@ -28,21 +28,21 @@ jobs:
           #          - name: gitlab2
           #            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_2:latest
           #            registry: gitlab
-          - name: gitlab3
-            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_3:latest
-            registry: gitlab
-          - name: gitlab4
-            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_4:latest
-            registry: gitlab
-          - name: gitlab5
-            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_5:latest
-            registry: gitlab
-          - name: gitlab6
-            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_6:latest
-            registry: gitlab
-          - name: gitlab7
-            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_7:latest
-            registry: gitlab
+#          - name: gitlab3
+#            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_3:latest
+#            registry: gitlab
+#          - name: gitlab4
+#            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_4:latest
+#            registry: gitlab
+#          - name: gitlab5
+#            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_5:latest
+#            registry: gitlab
+#          - name: gitlab6
+#            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_6:latest
+#            registry: gitlab
+#          - name: gitlab7
+#            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_7:latest
+#            registry: gitlab
           - name: gitlab8
             image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_8:latest
             registry: gitlab
