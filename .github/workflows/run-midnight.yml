@@ -1,4 +1,4 @@
-name: Run Containers (matrix)
+name: Public Run Containers (matrix)
 
 on:
   # Triggers the workflow every day at 23:52 UTC (London winter = GMT).
