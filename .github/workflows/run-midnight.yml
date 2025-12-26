@@ -1,0 +1,188 @@
+name: Run Containers (matrix)
+
+on:
+  # Triggers the workflow every day at 23:52 UTC (London winter = GMT).
+  # NOTE: GitHub Actions schedules run in UTC and can be delayed by a few minutes.
+  schedule:
+    - cron: "45 23 * * *"
+  # Allows you to start this workflow manually from the GitHub UI.
+  workflow_dispatch:
+
+jobs:
+  run-containers:
+    runs-on: ubuntu-latest          # Use GitHub-hosted Ubuntu runner.
+    timeout-minutes: 20             # Hard stop the job after 20 minutes to allow container to run past midnight.
+
+    # Matrix strategy: creates parallel jobs, one per target.
+    # Each job gets its own logs and runs independently.
+    strategy:
+      matrix:
+        target:
+          # --- GitLab image ---
+          #          - name: gitlab
+          #            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_linux_rest_image_2:latest
+          #            registry: gitlab
+          #          - name: gitlab1
+          #            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_1:latest
+          #            registry: gitlab
+          #          - name: gitlab2
+          #            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_2:latest
+          #            registry: gitlab
+          - name: gitlab3
+            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_3:latest
+            registry: gitlab
+          - name: gitlab4
+            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_4:latest
+            registry: gitlab
+          - name: gitlab5
+            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_5:latest
+            registry: gitlab
+          - name: gitlab6
+            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_6:latest
+            registry: gitlab
+          - name: gitlab7
+            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_7:latest
+            registry: gitlab
+          - name: gitlab8
+            image: registry.gitlab.com/dineshbabukp/springboot-selenium/selenium_mac_rest_image_8:latest
+            registry: gitlab
+          # --- Docker Hub images ---
+    #          - name: dockerhub1
+    #            image: docker.io/dineshbabukp/selenium_linux_rest_image_1:latest
+    #            registry: dockerhub
+
+    steps:
+      # -----------------------------
+      # 1) Authenticate to the correct registry for this matrix target
+      #    - Uses secrets from your repo settings
+      #    - GitLab requires username + PAT; Docker Hub requires username + token/password
+      # -----------------------------
+      - name: Log in to registry
+        run: |
+          if [ "${{ matrix.target.registry }}" = "gitlab" ]; then
+            # GitLab: login using deployemnt token via stdin
+            echo "${{ secrets.GITLAB_DEPLOY_TOKEN }}" | docker login registry.gitlab.com -u "${{ secrets.GITLAB_DEPLOY_USER }}" --password-stdin
+          else
+            # Docker Hub: login using token/password via stdin
+            # echo "${{ secrets.DOCKERHUB_DINESH_YAHOO_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_DINESH_YAHOO_USERNAME }}" --password-stdin
+            echo "Not git lab registry: Space holder block for docker hub registry for future use"
+          fi
+
+      # -----------------------------
+      # 2) Pull the image for this target
+      #    - Ensures the runner has the latest image layers before starting the container
+      # -----------------------------
+      - name: Pull image
+        run: docker pull "${{ matrix.target.image }}"
+
+      # -----------------------------
+      # 3) Run the container DETACHED
+      #    - -d starts the container in the background so subsequent steps can proceed
+      #    - --shm-size=1g avoids browser crashes with Selenium/Chromium due to tiny default /dev/shm
+      #    - Names the container "job_<name>" so later steps can refer to it
+      # -----------------------------
+      - name: Run container (detached)
+        run: docker run -d --name "job_${{ matrix.target.name }}" --shm-size=1g "${{ matrix.target.image }}"
+
+      # -----------------------------
+      # 4) Stream live logs for up to 8 minutes
+      #    - docker logs -f follows the output in real-time
+      #    - --timestamps adds ISO timestamps to each line
+      #    - timeout ensures the step ends even if the app keeps running
+      # -----------------------------
+      - name: Live logs
+        run: |
+          # Stream logs for up to 8 minutes; they appear only in this job's log
+          timeout 8m docker logs -f --timestamps "job_${{ matrix.target.name }}" || true
+
+      # -----------------------------
+      # *** NEW STEP ***
+      # Wait until after midnight so booking logic can run
+      # -----------------------------
+      - name: Wait until after midnight
+        run: |
+          echo "Waiting until 00:02 UTC so booking logic can run..."
+          TARGET="00:02"
+          while [ "$(date -u +%H:%M)" != "$TARGET" ]; do
+            sleep 5
+          done
+
+      # -----------------------------
+      # *** NEW STEP ***
+      # Check if container crashed before midnight (optional warning)
+      # -----------------------------
+      - name: Check if container is still running
+        run: |
+          if [ "$(docker inspect -f '{{.State.Running}}' job_${{ matrix.target.name }})" != "true" ]; then
+            echo "WARNING: Container exited early before midnight!"
+          fi
+
+      # -----------------------------
+      # 5) Save full logs to a file (always)
+      #    - Captures complete logs (not just the 8-minute window) for archival/debugging
+      # -----------------------------
+      - name: Save logs
+        if: always()
+        run: docker logs --timestamps "job_${{ matrix.target.name }}" > "${{ matrix.target.name }}.log"
+
+      # -----------------------------
+      # *** NEW STEP ***
+      # Extract success lines from logs
+      # -----------------------------
+      - name: Extract success lines
+        run: |
+          grep -i "booking successful for slot" "${{ matrix.target.name }}.log" > "success-${{ matrix.target.name }}.txt" || true
+
+      # -----------------------------
+      # *** NEW STEP ***
+      # Generate success/failure summary
+      # -----------------------------
+      - name: Generate summary
+        run: |
+          if [ -s "success-${{ matrix.target.name }}.txt" ]; then
+            echo "${{ matrix.target.name }}: SUCCESS" > "summary-${{ matrix.target.name }}.txt"
+          else
+            echo "${{ matrix.target.name }}: FAILURE" > "summary-${{ matrix.target.name }}.txt"
+          fi
+
+      # -----------------------------
+      # *** NEW STEP ***
+      # Send Telegram notification with success lines
+      # -----------------------------
+      - name: Send Telegram Notification
+        if: always()
+        run: |
+          MESSAGE="Booking Summary for ${{ matrix.target.name }}%0A%0A"
+          if [ -s "success-${{ matrix.target.name }}.txt" ]; then
+            MESSAGE+="SUCCESS%0A"
+            while IFS= read -r line; do
+              MESSAGE+="${line}%0A"
+            done < "success-${{ matrix.target.name }}.txt"
+          else
+            MESSAGE+="FAILURE%0A(no success messages found)%0A"
+          fi
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="$MESSAGE"
+
+      # -----------------------------
+      # 6) Upload the log file as a downloadable artifact (always)
+      #    - Shows up under the "Artifacts" section in the run summary
+      #    - Lets you download and inspect logs later
+      # -----------------------------
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "logs-${{ matrix.target.name }}"     # Artifact name visible in the UI
+          path: "${{ matrix.target.name }}.log"      # The file we just saved
+
+      # -----------------------------
+      # 7) Cleanup (always)
+      #    - Removes the container whether the job passed or failed
+      #    - `|| true` prevents the step from failing if the container is already gone
+      # -----------------------------
+      - name: Cleanup
+        if: always()
+        run: docker rm -f "job_${{ matrix.target.name }}" || true
