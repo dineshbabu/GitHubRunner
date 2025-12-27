@@ -4,7 +4,7 @@ on:
   # Triggers the workflow every day at 22:30 UTC (London summer = BST).
   # NOTE: GitHub Actions schedules run in UTC and can be delayed by a few minutes.
   schedule:
-  #- cron: "30 22 * * *"
+  - cron: "30 22 * * *"
   # Allows you to start this workflow manually from the GitHub UI.
   workflow_dispatch:
 
