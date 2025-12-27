@@ -11,7 +11,7 @@ on:
 jobs:
   run-containers:
     runs-on: ubuntu-latest          # Use GitHub-hosted Ubuntu runner.
-    timeout-minutes: 90             # Allow up to 90 minutes so guard wait can cover winter offset.
+    timeout-minutes: 92             # Allow up to 92 minutes so guard wait can cover winter offset.
 
     # Matrix strategy: creates parallel jobs, one per target.
     # Each job gets its own logs and runs independently.
