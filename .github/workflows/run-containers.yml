@@ -91,11 +91,11 @@ jobs:
           timeout 8m docker logs -f --timestamps "job_${{ matrix.target.name }}" || true
 
       # -----------------------------
-      # 6) Wait until after midnight so booking logic can run
+      # 6) Wait until after midnight
       # -----------------------------
       - name: Wait until after midnight
         run: |
-          echo "Waiting until 00:02 UK local time so booking logic can run..."
+          echo "Waiting until 00:02 UK local time..."
           TARGET="0002"
           while [ "$(TZ=Europe/London date +%H%M)" -lt "$TARGET" ]; do
             sleep 5
