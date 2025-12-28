@@ -18,7 +18,7 @@ jobs:
         run: |
           echo "Waiting until 23:52 Europe/London local time..."
 
-          TARGET="1712"
+          TARGET="2352"
           NOW=$(TZ=Europe/London date +%H%M)
 
           echo "Current time: $NOW, target: $TARGET"
