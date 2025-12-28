@@ -3,7 +3,7 @@ name: Heartbeat Trigger
 on:
   # Kick off at 22:15 UTC (22:15 London in winter, 23:15 in summer).
   schedule:
-    - cron: "15 22 * * *"
+    - cron: "11 17 * * *"
   workflow_dispatch:
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
       # -----------------------------
       - name: Wait until 23:50 London time
         run: |
-          echo "Waiting until 23:50 Europe/London local time..."
+          echo "Waiting until 17:12 Europe/London local time..."
           TARGET=2350
           while [ "$(TZ=Europe/London date +%H%M)" -lt "$TARGET" ]; do
             sleep 15
