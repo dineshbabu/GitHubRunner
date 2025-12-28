@@ -1,0 +1,48 @@
+name: Heartbeat Trigger
+
+on:
+  # Kick off at 22:15 UTC (22:15 London in winter, 23:15 in summer).
+  schedule:
+    - cron: "15 22 * * *"
+  workflow_dispatch:
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # plenty of buffer
+
+    steps:
+      # -----------------------------
+      # 1) Guard: wait until UK local 23:50
+      # -----------------------------
+      - name: Wait until 23:50 London time
+        run: |
+          echo "Waiting until 23:50 Europe/London local time..."
+          TARGET=2350
+          while [ "$(TZ=Europe/London date +%H%M)" -lt "$TARGET" ]; do
+            sleep 15
+          done
+          echo "Reached $(TZ=Europe/London date +%H:%M), proceeding..."
+
+      # -----------------------------
+      # 2) Fire API to invoke run-containers.yml
+      # -----------------------------
+      - name: Trigger run-containers.yml
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.CLASSIC_GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/run-containers.yml/dispatches \
+            -d '{"ref":"master"}'
+
+      # -----------------------------
+      # 3) Cancel this heartbeat run
+      # -----------------------------
+      - name: Cancel heartbeat run
+        if: always()
+        run: |
+          echo "Cancelling this heartbeat workflow run..."
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.CLASSIC_GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel
