@@ -1,32 +1,42 @@
 name: Heartbeat Trigger
 
 on:
-  # Kick off at 22:15 UTC (22:15 London in winter, 23:15 in summer).
   schedule:
-    - cron: "11 17 * * *"
+    - cron: "11 17 * * *"   # 17:11 UTC
   workflow_dispatch:
 
 jobs:
   heartbeat:
     runs-on: ubuntu-latest
-    timeout-minutes: 120   # plenty of buffer
+    timeout-minutes: 120
 
     steps:
-      # -----------------------------
-      # 1) Guard: wait until UK local 23:50
-      # -----------------------------
-      - name: Wait until 23:50 London time
+      # ---------------------------------------------------------
+      # 1) Guard: wait until 17:12 UK time ONLY if still ahead
+      # ---------------------------------------------------------
+      - name: Wait until 17:12 London time
         run: |
           echo "Waiting until 17:12 Europe/London local time..."
-          TARGET=2350
-          while [ "$(TZ=Europe/London date +%H%M)" -lt "$TARGET" ]; do
-            sleep 15
-          done
+
+          TARGET="1712"
+          NOW=$(TZ=Europe/London date +%H%M)
+
+          echo "Current time: $NOW, target: $TARGET"
+
+          if [ "$NOW" -lt "$TARGET" ]; then
+            echo "Target is later today. Waiting until $TARGET..."
+            while [ "$(TZ=Europe/London date +%H%M)" -lt "$TARGET" ]; do
+              sleep 15
+            done
+          else
+            echo "Target already passed today. Proceeding immediately..."
+          fi
+
           echo "Reached $(TZ=Europe/London date +%H:%M), proceeding..."
 
-      # -----------------------------
-      # 2) Fire API to invoke run-containers.yml
-      # -----------------------------
+      # ---------------------------------------------------------
+      # 2) Trigger run-containers.yml
+      # ---------------------------------------------------------
       - name: Trigger run-containers.yml
         run: |
           curl -X POST \
@@ -35,9 +45,9 @@ jobs:
             https://api.github.com/repos/${{ github.repository }}/actions/workflows/run-containers.yml/dispatches \
             -d '{"ref":"master"}'
 
-      # -----------------------------
+      # ---------------------------------------------------------
       # 3) Cancel this heartbeat run
-      # -----------------------------
+      # ---------------------------------------------------------
       - name: Cancel heartbeat run
         if: always()
         run: |
