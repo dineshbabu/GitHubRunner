@@ -1,17 +1,16 @@
 name: Run Containers (matrix)
 
 on:
-  # Triggers the workflow every day at 22:30 UTC (London summer = BST).
-  # NOTE: GitHub Actions schedules run in UTC and can be delayed by a few minutes.
-  schedule:
-  - cron: "30 22 * * *"
+  # schedule:
+  #   - cron: "30 22 * * *"   # Old daily trigger at 22:30 UTC
+
   # Allows you to start this workflow manually from the GitHub UI.
   workflow_dispatch:
 
 jobs:
   run-containers:
     runs-on: ubuntu-latest          # Use GitHub-hosted Ubuntu runner.
-    timeout-minutes: 92             # Allow up to 92 minutes so guard wait can cover winter offset.
+    timeout-minutes: 20             # Allow up to 20 minutes so guard wait can cover winter offset.
 
     # Matrix strategy: creates parallel jobs, one per target.
     # Each job gets its own logs and runs independently.
