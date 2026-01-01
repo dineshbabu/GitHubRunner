@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 120
 
     env:
-      TARGET_TIME: "2352"   # <--- change here only
+      TARGET_TIME: "1846"   # <--- change here only
 
     steps:
       # ---------------------------------------------------------
@@ -37,14 +37,14 @@ jobs:
           echo "Reached $(TZ=Europe/London date +%H:%M), proceeding..."
 
       # ---------------------------------------------------------
-      # 2) Trigger run-containers.yml
+      # 2) Trigger PRIVATE_REPO_WORKFLOW
       # ---------------------------------------------------------
-      - name: Trigger run-containers.yml
+      - name: Trigger PRIVATE_REPO_WORKFLOW
         run: |
           curl -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.CLASSIC_GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ secrets.PRIVATE_REPO }}/actions/workflows/run-containers.yml/dispatches \
+            https://api.github.com/repos/${{ secrets.PRIVATE_REPO }}/actions/workflows/${{secrets.PRIVATE_REPO_WORKFLOW}}/dispatches \
             -d '{"ref":"master"}'
 
       # ---------------------------------------------------------
