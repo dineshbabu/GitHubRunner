@@ -524,31 +524,27 @@ function assembleFinalMatchesAndLeftovers(rawMatches) {
 // Replace runGenerateRound with this robust orchestrator
 function runGenerateRound() {
   const nextRound = getNextRoundNumber();
-  // generate raw matches (may include singles/pairs/triples and placeholders)
   const rawMatches = generateRound(nextRound);
 
-  // Defensive: fill waiters into matches (this will not place someone already placed)
   includeWaitersIntoMatches(rawMatches, loadPlayers(), loadRecentMatches(10));
-
-  // Merge pairs into fours (as before)
   const merged = mergePairsIntoFour(rawMatches);
 
-  // Assemble final kept matches and leftovers deterministically
   const { cleanedKept, finalLeftovers } = assembleFinalMatchesAndLeftovers(merged);
 
-  // Logging for diagnostics
-  Logger.log('RAW MATCHES: ' + JSON.stringify(rawMatches, null, 2));
-  Logger.log('MERGED: ' + JSON.stringify(merged, null, 2));
-  Logger.log('CLEANED KEPT: ' + JSON.stringify(cleanedKept, null, 2));
-  Logger.log('FINAL LEFTOVERS: ' + JSON.stringify(finalLeftovers, null, 2));
-
-  // Persist and write sheets
   recordMatches(cleanedKept, nextRound);
-  writeCurrentRoundSheet(merged, nextRound); // keep raw merged for reference
+  writeCurrentRoundSheet(merged, nextRound);
   writeMatchesSheetWithWaiters(cleanedKept, finalLeftovers, nextRound);
 
-  // Friendly UI message
-  SpreadsheetApp.getUi().alert('Round ' + nextRound + ' generated: ' + cleanedKept.length + ' courts filled, ' + finalLeftovers.length + ' waiting.');
+  SpreadsheetApp.getUi().alert(
+    'Round ' + nextRound + ' generated: ' +
+    cleanedKept.length + ' courts filled, ' +
+    finalLeftovers.length + ' players waiting.'
+  );
+
+  // 👉 This line moves focus to the Matches sheet
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SHEET_MATCHES);
+  if (sh) ss.setActiveSheet(sh);
 }
 
 function resetHistoryAndRoundsWithConfirm() {
