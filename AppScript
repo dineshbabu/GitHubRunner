@@ -392,9 +392,21 @@ function writeCurrentRoundSheet(matches, roundNumber) {
 function writeMatchesSheetWithWaiters(matches, leftovers, roundNumber) {
   const ss = SpreadsheetApp.getActive();
   let sh = ss.getSheetByName(SHEET_MATCHES);
-  if (!sh) sh = ss.insertSheet(SHEET_MATCHES);
-  sh.clear();
-  sh.appendRow(['Round','Court','Team1 P1','Team1 P2','Team2 P1','Team2 P2','Type','Score','Players Waiting']);
+  if (!sh) {
+    sh = ss.insertSheet(SHEET_MATCHES);
+    sh.appendRow(['Round','Court','Team1 P1','Team1 P2','Team2 P1','Team2 P2','Type','Score','Players Waiting']);
+  }
+
+  const headerRow = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const blankRow = new Array(headerRow.length).fill('');
+
+  // 👉 Add timestamp row before each round
+  const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd MMM yyyy, HH:mm');
+  sh.appendRow(['Generated on ' + timestamp]);
+
+  // 👉 Add blank separator row
+  sh.appendRow(blankRow);
+
   let court = 1;
   for (const m of matches) {
     const players = (m.players || []).slice();
@@ -416,7 +428,6 @@ function writeMatchesSheetWithWaiters(matches, leftovers, roundNumber) {
 
   if (leftovers && leftovers.length) {
     const waitingText = Array.from(new Set(leftovers)).join(', ');
-    const headerRow = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
     const waitingColIndex = headerRow.findIndex(h => String(h).trim().toUpperCase() === 'PLAYERS WAITING');
     const row = new Array(headerRow.length).fill('');
     if (waitingColIndex !== -1) {
@@ -549,14 +560,31 @@ function runGenerateRound() {
 
 function resetHistoryAndRoundsWithConfirm() {
   const ui = SpreadsheetApp.getUi();
-  const resp = ui.alert('Reset Match History', 'This will clear the Match History and Current Round sheets. Continue?', ui.ButtonSet.YES_NO);
-  if (resp !== ui.Button.YES) { ui.alert('Reset cancelled.'); return; }
+  const resp = ui.alert(
+    'Reset Match History',
+    'This will clear the Match History, Current Round, and Matches sheets. Continue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (resp !== ui.Button.YES) {
+    ui.alert('Reset cancelled.');
+    return;
+  }
+
   const ss = SpreadsheetApp.getActive();
   try { const sh = ss.getSheetByName(SHEET_HISTORY); if (sh) ss.deleteSheet(sh); } catch(e) {}
   try { const cr = ss.getSheetByName(SHEET_CURRENT); if (cr) ss.deleteSheet(cr); } catch(e) {}
-  const newH = ss.insertSheet(SHEET_HISTORY); newH.appendRow(['Timestamp','MatchPlayers','Round','GroupTag']);
-  const newCR = ss.insertSheet(SHEET_CURRENT); newCR.appendRow(['Round','Group','Players']);
-  ui.alert('Match History and Current Round cleared and recreated.');
+  try { const ms = ss.getSheetByName(SHEET_MATCHES); if (ms) ss.deleteSheet(ms); } catch(e) {}
+
+  const newH = ss.insertSheet(SHEET_HISTORY);
+  newH.appendRow(['Timestamp','MatchPlayers','Round','GroupTag']);
+
+  const newCR = ss.insertSheet(SHEET_CURRENT);
+  newCR.appendRow(['Round','Group','Players']);
+
+  const newM = ss.insertSheet(SHEET_MATCHES);
+  newM.appendRow(['Round','Court','Team1 P1','Team1 P2','Team2 P1','Team2 P2','Type','Score','Players Waiting']);
+
+  ui.alert('Match History, Current Round, and Matches sheets cleared and recreated.');
 }
 
 function onOpen() {
