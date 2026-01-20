@@ -1,0 +1,571 @@
+// Part 1: Configuration and data loading
+const SHEET_PLAYERS = 'Players';
+const SHEET_MATCHES = 'Matches';
+const SHEET_HISTORY = 'Match History';
+const SHEET_CURRENT = 'Current Round';
+const GROUP_ORDER = ['A','B','C','D']; // A is top
+
+// Optional: names to always exclude (upper-case trimmed)
+const EXCLUDE_PLAYERS = new Set([]);
+
+function readPlayersWaitingFromMatches(ss) {
+  const set = new Set();
+  const sh = ss.getSheetByName(SHEET_MATCHES);
+  if (!sh) return set;
+  const values = sh.getDataRange().getValues();
+  for (let r = 0; r < values.length; r++) {
+    for (let c = 0; c < values[r].length; c++) {
+      const cell = String(values[r][c] || '').trim();
+      // Accept either "Players Waiting" header cell or a cell that contains the names
+      if (/^Players\s*Waiting$/i.test(cell)) {
+        // next row same column may contain the names; try to read it
+        const nextRow = r + 1;
+        if (nextRow < values.length) {
+          const after = String(values[nextRow][c] || '').trim();
+          if (after) after.split(',').map(s => s.trim()).filter(Boolean).forEach(n => set.add(n));
+        }
+      }
+      // Also support legacy "Players Waiting: name, name" in a single cell
+      if (/^Players\s*Waiting\s*:/i.test(cell)) {
+        const after = cell.split(':').slice(1).join(':').trim();
+        if (after) after.split(',').map(s => s.trim()).filter(Boolean).forEach(n => set.add(n));
+      }
+    }
+  }
+  return set;
+}
+
+function getCourtsCount() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SHEET_PLAYERS);
+  if (!sh) return 4;
+  const lastCol = Math.max(1, sh.getLastColumn());
+  const headerRow = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim());
+  const H = headerRow.map(h => h.toUpperCase());
+  const candidates = ['COURTSCOUNT','COURTS COUNT','COURTS','COURTCOUNT','COURT COUNT'];
+  let col = -1;
+  for (const cand of candidates) {
+    const i = H.indexOf(cand);
+    if (i !== -1) { col = i + 1; break; }
+  }
+  if (col === -1) return 4;
+  const lastRow = Math.max(2, sh.getLastRow());
+  const vals = sh.getRange(2, col, Math.max(1, lastRow - 1), 1).getValues().map(r => r[0]);
+  for (const v of vals) {
+    const n = Number(String(v).replace(/[^\d.-]/g, ''));
+    if (!isNaN(n) && n > 0) return Math.floor(n);
+  }
+  return 4;
+}
+
+function loadPlayers() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SHEET_PLAYERS);
+  if (!sh) throw new Error('Players sheet not found');
+  const lastCol = Math.max(1, sh.getLastColumn());
+  const headerRow = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim());
+  const H = headerRow.map(h => h.toUpperCase());
+  const idx = {
+    name: H.indexOf('PLAYER') !== -1 ? H.indexOf('PLAYER') : H.indexOf('PLAYER NAME'),
+    group: H.indexOf('GROUP'),
+    rank: (H.indexOf('GROUPLEVEL') !== -1 ? H.indexOf('GROUPLEVEL') : H.indexOf('RANK')),
+    playing: H.indexOf('PLAYING')
+  };
+  if (idx.name === -1 || idx.group === -1 || idx.rank === -1) {
+    throw new Error('Players sheet headers missing. Expected Player, Group, GroupLevel/RANK.');
+  }
+
+  const explicitWaiters = readPlayersWaitingFromMatches(ss);
+  const lastRow = sh.getLastRow();
+  if (lastRow < 2) return [];
+  const rows = sh.getRange(2, 1, lastRow - 1, lastCol).getValues();
+
+  const players = [];
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r];
+    const rawName = String(row[idx.name] || '').trim();
+    if (!rawName) continue;
+    const normName = rawName.toUpperCase();
+    if (EXCLUDE_PLAYERS.has(normName)) continue;
+
+    let rawGroup = String(row[idx.group] || '').trim().toUpperCase();
+    let group = 'D';
+    const gm = rawGroup.match(/[A-D]/i);
+    if (gm) group = gm[0].toUpperCase();
+    else {
+      const num = Number(rawGroup);
+      if (!isNaN(num) && num >= 1 && num <= 4) group = ['A','B','C','D'][num - 1];
+    }
+
+    const rank = Number(row[idx.rank]) || 9999;
+
+    let playingFlag = false;
+    if (idx.playing !== -1) {
+      const val = String(row[idx.playing] || '').trim();
+      if (/^(?:YES|TRUE|1)$/i.test(val)) playingFlag = true;
+    }
+
+    // If the player is explicitly listed in the Matches sheet waiting list, treat them as waited
+    const waited = explicitWaiters.has(rawName) || !!playingFlag;
+    players.push({ name: rawName, group, rank, waited });
+  }
+  return players;
+}
+
+function loadRecentMatches(limit) {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SHEET_HISTORY);
+  if (!sh) return [];
+  const rows = sh.getDataRange().getValues();
+  if (rows.length <= 1) return [];
+  const data = rows.slice(1).slice(-limit);
+  return data.map(r => String(r[1] || '').split(',').map(s => s.trim()).filter(Boolean));
+}
+
+// Part 2: Helpers and pairing logic
+function groupIndex(g) {
+  const i = GROUP_ORDER.indexOf(String(g || '').trim().toUpperCase());
+  return i === -1 ? GROUP_ORDER.length : i;
+}
+
+function isRepeatPair(pair, prevMatches) {
+  const [a, b] = pair;
+  for (const m of prevMatches || []) {
+    if (m.includes(a) && m.includes(b)) return true;
+  }
+  return false;
+}
+
+// Pair nearest ranks within a group
+function nearestPairsWithinGroup(playersInGroup, prevMatches) {
+  const list = playersInGroup.slice().sort((a, b) => a.rank - b.rank);
+  const pairs = [];
+  const taken = new Set();
+  for (let i = 0; i < list.length; i++) {
+    if (taken.has(i)) continue;
+    let bestJ = -1, bestDist = Infinity;
+    for (let j = i + 1; j < list.length; j++) {
+      if (taken.has(j)) continue;
+      const dist = Math.abs(list[i].rank - list[j].rank);
+      if (dist < bestDist) { bestDist = dist; bestJ = j; }
+    }
+    if (bestJ !== -1) {
+      const a = list[i].name, b = list[bestJ].name;
+      if (!isRepeatPair([a, b], prevMatches)) {
+        pairs.push([a, b]);
+        taken.add(i); taken.add(bestJ);
+      }
+    }
+  }
+  for (let i = 0; i < list.length; i++) if (!taken.has(i)) pairs.push([list[i].name]);
+  return pairs;
+}
+
+// Mixed-group pairing: bottom of higher group with top of lower group
+function pickMixedBetweenGroups(topGroupPlayers, lowerGroupPlayers, prevMatches) {
+  const topGroup = topGroupPlayers.slice().sort((a, b) => b.rank - a.rank); // worst first
+  const lowerGroup = lowerGroupPlayers.slice().sort((a, b) => a.rank - b.rank); // best first
+
+  const pairs = [];
+  let i = 0, j = 0;
+  while (i < topGroup.length && j < lowerGroup.length) {
+    const a = topGroup[i], b = lowerGroup[j];
+    if (!isRepeatPair([a.name, b.name], prevMatches)) {
+      pairs.push([a.name, b.name]); i++; j++;
+    } else {
+      if (j + 1 < lowerGroup.length) { j++; continue; }
+      if (i + 1 < topGroup.length) { i++; continue; }
+      pairs.push([a.name, b.name]); i++; j++;
+    }
+  }
+
+  const leftovers = [];
+  for (let k = i; k < topGroup.length; k++) leftovers.push([topGroup[k].name]);
+  for (let k = j; k < lowerGroup.length; k++) leftovers.push([lowerGroup[k].name]);
+  return { pairs, leftovers };
+}
+
+// Merge adjacent 2-player pairs into 4-player matches where possible.
+function mergePairsIntoFour(matches) {
+  if (!Array.isArray(matches)) return matches;
+  const out = [];
+  for (let i = 0; i < matches.length; i++) {
+    const cur = matches[i];
+    if (cur && Array.isArray(cur.players) && cur.players.length === 2) {
+      let found = -1;
+      for (let j = i + 1; j < matches.length; j++) {
+        const cand = matches[j];
+        if (cand && Array.isArray(cand.players) && cand.players.length === 2) {
+          if (cur.group && cand.group && cur.group === cand.group) { found = j; break; }
+          if (found === -1) found = j;
+        }
+      }
+      if (found !== -1) {
+        const cand = matches[found];
+        out.push({ group: cur.group || cand.group || 'TBD', players: cur.players.concat(cand.players) });
+        matches[found] = null;
+        continue;
+      }
+    }
+    if (cur) out.push(cur);
+  }
+  return out;
+}
+
+// Include waited players into matches (fill singletons/pairs/triples up to 4)
+function includeWaitersIntoMatches(matches, allPlayers, prevMatches) {
+  const placed = new Set();
+  matches.forEach(m => (m.players || []).forEach(n => placed.add(n)));
+
+  const waited = allPlayers.filter(p => p.waited && !placed.has(p.name)).map(p => p.name);
+  if (!waited.length) return;
+
+  for (const w of waited) {
+    let placedNow = false;
+    for (const m of matches) {
+      if ((m.players || []).length < 4) {
+        const wouldRepeat = (m.players || []).some(p => isRepeatPair([w, p], prevMatches));
+        if (!wouldRepeat && !placed.has(w)) {
+          m.players = (m.players || []).concat([w]);
+          placed.add(w);
+          placedNow = true;
+          break;
+        }
+      }
+    }
+    if (!placedNow && !placed.has(w)) {
+      matches.push({ group: 'TBD', players: [w] });
+      placed.add(w);
+    }
+  }
+}
+
+function detectMatchGroupTag(players) {
+  const allPlayers = loadPlayers();
+  const groupSet = new Set();
+  for (const name of players) {
+    const p = allPlayers.find(x => x.name === name);
+    if (p && p.group) groupSet.add(p.group);
+  }
+  const groups = Array.from(groupSet).sort((a, b) => groupIndex(a) - groupIndex(b));
+  if (groups.length === 1) return groups[0];
+  if (groups.length === 2 && Math.abs(groupIndex(groups[0]) - groupIndex(groups[1])) === 1) {
+    return groups.join('+');
+  }
+  return 'Mixed';
+}
+
+// Part 3: Round generation with alternating rounds and special case
+function generateRoundAlternating(roundNumber) {
+  const players = loadPlayers().filter(p => p.waited);
+  const byGroup = {};
+  GROUP_ORDER.forEach(g => byGroup[g] = []);
+  for (const p of players) {
+    const g = GROUP_ORDER.includes(p.group) ? p.group : 'D';
+    byGroup[g].push(Object.assign({}, p));
+  }
+  for (const g of GROUP_ORDER) byGroup[g].sort((a,b) => a.rank - b.rank);
+
+  const prevMatches = loadRecentMatches(10);
+  const matches = [];
+
+  if (roundNumber % 2 === 1) {
+    // Odd rounds: same-group matches
+    for (const g of GROUP_ORDER) {
+      const groupMatches = nearestPairsWithinGroup(byGroup[g], prevMatches);
+      for (const m of groupMatches) matches.push({ group: g, players: m });
+    }
+  } else {
+    // Even rounds: mixed between adjacent groups
+    for (let gi = 0; gi < GROUP_ORDER.length - 1; gi++) {
+      const topG = GROUP_ORDER[gi];
+      const lowG = GROUP_ORDER[gi + 1];
+      const topPlayers = byGroup[topG];
+      const lowPlayers = byGroup[lowG];
+      if (topPlayers.length === 0 && lowPlayers.length === 0) continue;
+
+      // Special case: if top has exactly 3 players and lower has at least 1 -> 3A + top B
+      if (topG === 'A' && topPlayers.length === 3 && lowPlayers.length >= 1) {
+        const pickTop = topPlayers.slice().sort((a,b) => b.rank - a.rank).map(p => p.name);
+        const pickLow = lowPlayers.slice().sort((a,b) => a.rank - b.rank)[0].name;
+        matches.push({ group: topG + '+' + lowG, players: pickTop.concat([pickLow]) });
+        continue;
+      }
+
+      const { pairs, leftovers } = pickMixedBetweenGroups(topPlayers, lowPlayers, prevMatches);
+      for (const p of pairs) matches.push({ group: topG + '+' + lowG, players: p });
+      for (const l of leftovers) matches.push({ group: topG + '+' + lowG, players: l });
+    }
+  }
+
+  includeWaitersIntoMatches(matches, players, prevMatches);
+
+  // Merge adjacent pairs into 4-player matches so Team2 columns are filled
+  const merged = mergePairsIntoFour(matches);
+
+  return merged;
+}
+
+function generateRound(roundNumber) {
+  if (!roundNumber) roundNumber = getNextRoundNumber();
+  return generateRoundAlternating(roundNumber);
+}
+
+// Part 4: Recording, writing Matches, dedupe and UI
+
+function limitMatchesToCourts(matches) {
+  const courts = getCourtsCount();
+  const kept = [];
+  const placedPlayers = new Set();
+
+  for (const m of matches) {
+    if (!m || !Array.isArray(m.players)) continue;
+    if (m.players.length === 4 && kept.length < courts) {
+      kept.push({ group: m.group, players: m.players.slice() });
+      m.players.forEach(p => { if (p) placedPlayers.add(p); });
+    }
+  }
+
+  const allWaited = loadPlayers().filter(p => p.waited).map(p => p.name);
+  const leftovers = Array.from(new Set(allWaited.filter(name => !placedPlayers.has(name))));
+  return { kept, leftovers };
+}
+
+function dedupeKeptMatches(keptMatches) {
+  const placed = new Set();
+  const newKept = [];
+  const movedToLeftovers = [];
+
+  for (const m of keptMatches) {
+    if (!m || !Array.isArray(m.players)) continue;
+    const players = [];
+    for (const p of m.players) {
+      if (!p) continue;
+      if (!placed.has(p)) {
+        players.push(p);
+        placed.add(p);
+      } else {
+        movedToLeftovers.push(p);
+      }
+    }
+    if (players.length === 4) {
+      newKept.push({ group: m.group, players: players.slice() });
+    } else {
+      players.forEach(x => { if (x) movedToLeftovers.push(x); });
+    }
+  }
+
+  return { cleanedKept: newKept, movedToLeftovers: Array.from(new Set(movedToLeftovers)) };
+}
+
+function computeFinalLeftovers(cleanedKept, movedDuplicates) {
+  const placed = new Set();
+  cleanedKept.forEach(m => (m.players || []).forEach(p => placed.add(p)));
+  const allWaited = loadPlayers().filter(p => p.waited).map(p => p.name);
+  const leftoversFromWaited = allWaited.filter(n => !placed.has(n));
+  const combined = Array.from(new Set(leftoversFromWaited.concat(movedDuplicates || [])));
+  return combined;
+}
+
+function recordMatches(matches, roundNumber) {
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName(SHEET_HISTORY);
+  if (!sh) {
+    sh = ss.insertSheet(SHEET_HISTORY);
+    sh.appendRow(['Timestamp','MatchPlayers','Round','GroupTag']);
+  }
+  const now = new Date();
+  for (const m of matches) {
+    sh.appendRow([now, (m.players || []).join(', '), roundNumber, m.group || '']);
+  }
+}
+
+function writeCurrentRoundSheet(matches, roundNumber) {
+  const ss = SpreadsheetApp.getActive();
+  let cr = ss.getSheetByName(SHEET_CURRENT);
+  if (!cr) cr = ss.insertSheet(SHEET_CURRENT);
+  cr.clear();
+  cr.appendRow(['Round','Group','Players']);
+  matches.forEach(m => cr.appendRow([roundNumber, m.group || '', (m.players || []).join(', ')]));
+}
+
+function writeMatchesSheetWithWaiters(matches, leftovers, roundNumber) {
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName(SHEET_MATCHES);
+  if (!sh) sh = ss.insertSheet(SHEET_MATCHES);
+  sh.clear();
+  sh.appendRow(['Round','Court','Team1 P1','Team1 P2','Team2 P1','Team2 P2','Type','Score','Players Waiting']);
+  let court = 1;
+  for (const m of matches) {
+    const players = (m.players || []).slice();
+    let t1p1='', t1p2='', t2p1='', t2p2='';
+    if (players.length >= 4) {
+      t1p1 = players[0] || ''; t1p2 = players[1] || ''; t2p1 = players[2] || ''; t2p2 = players[3] || '';
+    } else if (players.length === 3) {
+      t1p1 = players[0] || ''; t1p2 = players[1] || ''; t2p1 = players[2] || '';
+    } else if (players.length === 2) {
+      t1p1 = players[0] || ''; t1p2 = players[1] || '';
+    } else if (players.length === 1) {
+      t1p1 = players[0] || '';
+    }
+    const type = detectMatchGroupTag(players);
+    const score = '';
+    sh.appendRow([roundNumber, 'Court ' + court, t1p1, t1p2, t2p1, t2p2, type, score, '']);
+    court++;
+  }
+
+  if (leftovers && leftovers.length) {
+    const waitingText = Array.from(new Set(leftovers)).join(', ');
+    const headerRow = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    const waitingColIndex = headerRow.findIndex(h => String(h).trim().toUpperCase() === 'PLAYERS WAITING');
+    const row = new Array(headerRow.length).fill('');
+    if (waitingColIndex !== -1) {
+      row[waitingColIndex] = waitingText;
+      sh.appendRow(row);
+    } else {
+      row[row.length - 1] = waitingText;
+      sh.appendRow(row);
+    }
+  }
+}
+
+function getNextRoundNumber() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(SHEET_HISTORY);
+  if (!sh) return 1;
+  const rows = sh.getDataRange().getValues();
+  if (rows.length <= 1) return 1;
+  const last = rows[rows.length - 1];
+  const lastRound = Number(last[2]);
+  return (isNaN(lastRound) ? rows.length : lastRound + 1);
+}
+
+// === Robust final assembly and orchestrator ===
+
+// Assemble final kept matches (up to courts) deterministically.
+// - Accepts the raw merged matches (from generateRound).
+// - Ensures no player appears on more than one kept match (first occurrence wins).
+// - If there are not enough full 4-player kept matches, it will try to build full matches
+//   from remaining players (pairs/singles) to fill courts where possible.
+// - Returns { cleanedKept, finalLeftovers }.
+function assembleFinalMatchesAndLeftovers(rawMatches) {
+  const courts = getCourtsCount();
+  const allPlayers = loadPlayers().filter(p => p.waited).map(p => p.name);
+  const placed = new Set();
+  const cleanedKept = [];
+
+  // Step 1: take full 4-player matches in order, keep first occurrence of each player
+  for (const m of rawMatches) {
+    if (!m || !Array.isArray(m.players)) continue;
+    if (m.players.length !== 4) continue;
+    // check if any player already placed
+    const conflict = m.players.some(p => placed.has(p));
+    if (!conflict && cleanedKept.length < courts) {
+      cleanedKept.push({ group: m.group || '', players: m.players.slice() });
+      m.players.forEach(p => placed.add(p));
+    }
+  }
+
+  // Step 2: if we still have court slots, try to combine remaining 2-player pairs into 4s
+  if (cleanedKept.length < courts) {
+    // collect remaining 2-player matches (that don't conflict)
+    const pairs = [];
+    for (const m of rawMatches) {
+      if (!m || !Array.isArray(m.players)) continue;
+      if (m.players.length === 2) {
+        if (!m.players.some(p => placed.has(p))) pairs.push({ group: m.group || '', players: m.players.slice() });
+      }
+    }
+    // greedily merge adjacent pairs (prefer same group)
+    while (cleanedKept.length < courts && pairs.length >= 2) {
+      // try to find two pairs with same group first
+      let foundI = -1, foundJ = -1;
+      for (let i = 0; i < pairs.length; i++) {
+        for (let j = i + 1; j < pairs.length; j++) {
+          if (pairs[i].group && pairs[j].group && pairs[i].group === pairs[j].group) {
+            foundI = i; foundJ = j; break;
+          }
+        }
+        if (foundI !== -1) break;
+      }
+      if (foundI === -1) { foundI = 0; foundJ = 1; } // fallback
+      const a = pairs[foundI], b = pairs[foundJ];
+      // ensure no overlap (shouldn't happen)
+      const overlap = a.players.some(p => b.players.includes(p));
+      if (!overlap) {
+        const merged = { group: a.group || b.group || 'TBD', players: a.players.concat(b.players) };
+        cleanedKept.push(merged);
+        merged.players.forEach(p => placed.add(p));
+      }
+      // remove used pairs (remove higher index first)
+      pairs.splice(foundJ, 1);
+      pairs.splice(foundI, 1);
+    }
+  }
+
+  // Step 3: if still slots remain, try to build matches from remaining singletons/pairs
+  if (cleanedKept.length < courts) {
+    // build a pool of remaining players (authoritative)
+    const remainingPool = allPlayers.filter(n => !placed.has(n));
+    // fill courts greedily with 4 from pool
+    while (cleanedKept.length < courts && remainingPool.length >= 4) {
+      const chunk = remainingPool.splice(0, 4);
+      cleanedKept.push({ group: 'TBD', players: chunk.slice() });
+      chunk.forEach(p => placed.add(p));
+    }
+  }
+
+  // Step 4: final leftovers = authoritative waited players not in placed
+  const finalLeftovers = allPlayers.filter(n => !placed.has(n));
+
+  return { cleanedKept, finalLeftovers };
+}
+
+// Replace runGenerateRound with this robust orchestrator
+function runGenerateRound() {
+  const nextRound = getNextRoundNumber();
+  // generate raw matches (may include singles/pairs/triples and placeholders)
+  const rawMatches = generateRound(nextRound);
+
+  // Defensive: fill waiters into matches (this will not place someone already placed)
+  includeWaitersIntoMatches(rawMatches, loadPlayers(), loadRecentMatches(10));
+
+  // Merge pairs into fours (as before)
+  const merged = mergePairsIntoFour(rawMatches);
+
+  // Assemble final kept matches and leftovers deterministically
+  const { cleanedKept, finalLeftovers } = assembleFinalMatchesAndLeftovers(merged);
+
+  // Logging for diagnostics
+  Logger.log('RAW MATCHES: ' + JSON.stringify(rawMatches, null, 2));
+  Logger.log('MERGED: ' + JSON.stringify(merged, null, 2));
+  Logger.log('CLEANED KEPT: ' + JSON.stringify(cleanedKept, null, 2));
+  Logger.log('FINAL LEFTOVERS: ' + JSON.stringify(finalLeftovers, null, 2));
+
+  // Persist and write sheets
+  recordMatches(cleanedKept, nextRound);
+  writeCurrentRoundSheet(merged, nextRound); // keep raw merged for reference
+  writeMatchesSheetWithWaiters(cleanedKept, finalLeftovers, nextRound);
+
+  // Friendly UI message
+  SpreadsheetApp.getUi().alert('Round ' + nextRound + ' generated: ' + cleanedKept.length + ' courts filled, ' + finalLeftovers.length + ' waiting.');
+}
+
+function resetHistoryAndRoundsWithConfirm() {
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.alert('Reset Match History', 'This will clear the Match History and Current Round sheets. Continue?', ui.ButtonSet.YES_NO);
+  if (resp !== ui.Button.YES) { ui.alert('Reset cancelled.'); return; }
+  const ss = SpreadsheetApp.getActive();
+  try { const sh = ss.getSheetByName(SHEET_HISTORY); if (sh) ss.deleteSheet(sh); } catch(e) {}
+  try { const cr = ss.getSheetByName(SHEET_CURRENT); if (cr) ss.deleteSheet(cr); } catch(e) {}
+  const newH = ss.insertSheet(SHEET_HISTORY); newH.appendRow(['Timestamp','MatchPlayers','Round','GroupTag']);
+  const newCR = ss.insertSheet(SHEET_CURRENT); newCR.appendRow(['Round','Group','Players']);
+  ui.alert('Match History and Current Round cleared and recreated.');
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('Match Tools')
+    .addItem('Generate next round','runGenerateRound')
+    .addItem('Reset history and rounds','resetHistoryAndRoundsWithConfirm')
+    .addToUi();
+}
