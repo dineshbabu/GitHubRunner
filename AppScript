@@ -546,28 +546,20 @@ function runGenerateRound() {
   writeCurrentRoundSheet(merged, nextRound);
   writeMatchesSheetWithWaiters(cleanedKept, finalLeftovers, nextRound);
 
-  SpreadsheetApp.getUi().alert(
-    'Round ' + nextRound + ' generated: ' +
-    cleanedKept.length + ' courts filled, ' +
-    finalLeftovers.length + ' players waiting.'
-  );
-
-  // 👉 This line moves focus to the Matches sheet
+  // 👉 Removed the alert — no popup at the end
   const ss = SpreadsheetApp.getActive();
   const sh = ss.getSheetByName(SHEET_MATCHES);
   if (sh) ss.setActiveSheet(sh);
 }
-
 function resetHistoryAndRoundsWithConfirm() {
   const ui = SpreadsheetApp.getUi();
   const resp = ui.alert(
-    'Reset Match History',
+    'Reset Match Data',
     'This will clear the Match History, Current Round, and Matches sheets. Continue?',
     ui.ButtonSet.YES_NO
   );
   if (resp !== ui.Button.YES) {
-    ui.alert('Reset cancelled.');
-    return;
+    return; // cancelled
   }
 
   const ss = SpreadsheetApp.getActive();
@@ -584,7 +576,9 @@ function resetHistoryAndRoundsWithConfirm() {
   const newM = ss.insertSheet(SHEET_MATCHES);
   newM.appendRow(['Round','Court','Team1 P1','Team1 P2','Team2 P1','Team2 P2','Type','Score','Players Waiting']);
 
-  ui.alert('Match History, Current Round, and Matches sheets cleared and recreated.');
+  // 👉 Stay in Players sheet after reset
+  const playersSheet = ss.getSheetByName(SHEET_PLAYERS);
+  if (playersSheet) ss.setActiveSheet(playersSheet);
 }
 
 function onOpen() {
