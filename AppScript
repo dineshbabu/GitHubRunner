@@ -1,675 +1,493 @@
-// Part 1: Configuration and data loading
-const SHEET_PLAYERS = 'Players';
-const SHEET_MATCHES = 'Matches';
-const SHEET_HISTORY = 'Match History';
-const SHEET_CURRENT = 'Current Round';
-const GROUP_ORDER = ['A', 'B', 'C', 'D']; // A is top
-
-// Toggle strict fairness on/off
-const ENFORCE_STRICT_WAIT_ROTATION = true;
-
-// Optional: names to always exclude (upper-case trimmed)
-const EXCLUDE_PLAYERS = new Set([]);
-
-function readPlayersWaitingFromMatches(ss) {
-  const set = new Set();
-  const sh = ss.getSheetByName(SHEET_MATCHES);
-  if (!sh) return set;
-  const values = sh.getDataRange().getValues();
-  for (let r = 0; r < values.length; r++) {
-    for (let c = 0; c < values[r].length; c++) {
-      const cell = String(values[r][c] || '').trim();
-      if (/^Players\s*Waiting$/i.test(cell)) {
-        const nextRow = r + 1;
-        if (nextRow < values.length) {
-          const after = String(values[nextRow][c] || '').trim();
-          if (after) after.split(',').map(s => s.trim()).filter(Boolean).forEach(n => set.add(n));
-        }
-      }
-      if (/^Players\s*Waiting\s*:/i.test(cell)) {
-        const after = cell.split(':').slice(1).join(':').trim();
-        if (after) after.split(',').map(s => s.trim()).filter(Boolean).forEach(n => set.add(n));
-      }
-    }
-  }
-  return set;
-}
-
-function getCourtsCount() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_PLAYERS);
-  if (!sh) return 4;
-  const lastCol = Math.max(1, sh.getLastColumn());
-  const headerRow = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim());
-  const H = headerRow.map(h => h.toUpperCase());
-  const candidates = ['COURTSCOUNT', 'COURTS COUNT', 'COURTS', 'COURTCOUNT', 'COURT COUNT'];
-  let col = -1;
-  for (const cand of candidates) {
-    const i = H.indexOf(cand);
-    if (i !== -1) { col = i + 1; break; }
-  }
-  if (col === -1) return 4;
-  const lastRow = Math.max(2, sh.getLastRow());
-  const vals = sh.getRange(2, col, Math.max(1, lastRow - 1), 1).getValues().map(r => r[0]);
-  for (const v of vals) {
-    const n = Number(String(v).replace(/[^\d.-]/g, ''));
-    if (!isNaN(n) && n > 0) return Math.floor(n);
-  }
-  return 4;
-}
-
-function loadPlayers() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_PLAYERS);
-  if (!sh) throw new Error('Players sheet not found');
-  const lastCol = Math.max(1, sh.getLastColumn());
-  const headerRow = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim());
-  const H = headerRow.map(h => h.toUpperCase());
-  const idx = {
-    name: H.indexOf('PLAYER') !== -1 ? H.indexOf('PLAYER') : H.indexOf('PLAYER NAME'),
-    group: H.indexOf('GROUP'),
-    rank: (H.indexOf('GROUPLEVEL') !== -1 ? H.indexOf('GROUPLEVEL') : H.indexOf('RANK')),
-    playing: H.indexOf('PLAYING')
-  };
-  if (idx.name === -1 || idx.group === -1 || idx.rank === -1) {
-    throw new Error('Players sheet headers missing. Expected Player, Group, GroupLevel/RANK.');
-  }
-
-  const explicitWaiters = readPlayersWaitingFromMatches(ss);
-  const lastRow = sh.getLastRow();
-  if (lastRow < 2) return [];
-
-  const rows = sh.getRange(2, 1, lastRow - 1, lastCol).getValues();
-  const players = [];
-  for (let r = 0; r < rows.length; r++) {
-    const row = rows[r];
-    const rawName = String(row[idx.name] || '').trim();
-    if (!rawName) continue;
-    const normName = rawName.toUpperCase();
-    if (EXCLUDE_PLAYERS.has(normName)) continue;
-    let rawGroup = String(row[idx.group] || '').trim().toUpperCase();
-    let group = 'D';
-    const gm = rawGroup.match(/[A-D]/i);
-    if (gm) group = gm[0].toUpperCase();
-    else {
-      const num = Number(rawGroup);
-      if (!isNaN(num) && num >= 1 && num <= 4) group = ['A', 'B', 'C', 'D'][num - 1];
-    }
-
-    const rank = Number(row[idx.rank]) || 9999;
-    let playingFlag = false;
-    if (idx.playing !== -1) {
-      const val = String(row[idx.playing] || '').trim();
-      if (/^(?:YES|TRUE|1)$/i.test(val)) playingFlag = true;
-    }
-
-    const waited = explicitWaiters.has(rawName) || !!playingFlag;
-    players.push({ name: rawName, group, rank, waited });
-  }
-  return players;
-}
-
-function loadRecentMatches(limit) {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_HISTORY);
-  if (!sh) return [];
-  const rows = sh.getDataRange().getValues();
-  if (rows.length <= 1) return [];
-  const data = rows.slice(1).slice(-limit);
-  return data.map(r => String(r[1] || '').split(',').map(s => s.trim()).filter(Boolean));
-}
-
-// Part 2: Helpers and pairing logic
-function groupIndex(g) {
-  const i = GROUP_ORDER.indexOf(String(g || '').trim().toUpperCase());
-  return i === -1 ? GROUP_ORDER.length : i;
-}
-
-function isRepeatPair(pair, prevMatches) {
-  const [a, b] = pair;
-  for (const m of prevMatches || []) {
-    if (m.includes(a) && m.includes(b)) return true;
-  }
-  return false;
-}
-
-function nearestPairsWithinGroup(playersInGroup, prevMatches) {
-  const list = playersInGroup.slice().sort((a, b) => a.rank - b.rank);
-  const pairs = [];
-  const taken = new Set();
-  for (let i = 0; i < list.length; i++) {
-    if (taken.has(i)) continue;
-    let bestJ = -1, bestDist = Infinity;
-    for (let j = i + 1; j < list.length; j++) {
-      if (taken.has(j)) continue;
-      const dist = Math.abs(list[i].rank - list[j].rank);
-      if (dist < bestDist) { bestDist = dist; bestJ = j; }
-    }
-    if (bestJ !== -1) {
-      const a = list[i].name, b = list[bestJ].name;
-      if (!isRepeatPair([a, b], prevMatches)) {
-        pairs.push([a, b]);
-        taken.add(i); taken.add(bestJ);
-      }
-    }
-  }
-  for (let i = 0; i < list.length; i++) if (!taken.has(i)) pairs.push([list[i].name]);
-  return pairs;
-}
-
-function pickMixedBetweenGroups(topGroupPlayers, lowerGroupPlayers, prevMatches) {
-  const topGroup = topGroupPlayers.slice().sort((a, b) => b.rank - a.rank); // worst first
-  const lowerGroup = lowerGroupPlayers.slice().sort((a, b) => a.rank - b.rank); // best first
-  const pairs = [];
-  let i = 0, j = 0;
-  while (i < topGroup.length && j < lowerGroup.length) {
-    const a = topGroup[i], b = lowerGroup[j];
-    if (!isRepeatPair([a.name, b.name], prevMatches)) {
-      pairs.push([a.name, b.name]); i++; j++;
-    } else {
-      if (j + 1 < lowerGroup.length) { j++; continue; }
-      if (i + 1 < topGroup.length) { i++; continue; }
-      pairs.push([a.name, b.name]); i++; j++;
-    }
-  }
-  const leftovers = [];
-  for (let k = i; k < topGroup.length; k++) leftovers.push([topGroup[k].name]);
-  for (let k = j; k < lowerGroup.length; k++) leftovers.push([lowerGroup[k].name]);
-  return { pairs, leftovers };
-}
-
-function mergePairsIntoFour(matches) {
-  if (!Array.isArray(matches)) return [];
-  const out = [];
-  const used = new Array(matches.length).fill(false);
-  for (let i = 0; i < matches.length; i++) {
-    if (used[i]) continue;
-    const cur = matches[i];
-    if (!cur || !Array.isArray(cur.players)) continue;
-    if (cur.players.length === 2) {
-      let found = -1;
-      for (let j = i + 1; j < matches.length; j++) {
-        if (used[j]) continue;
-        const cand = matches[j];
-        if (!cand || !Array.isArray(cand.players) || cand.players.length !== 2) continue;
-        if (cur.group && cand.group && cur.group === cand.group) { found = j; break; }
-        if (found === -1) found = j;
-      }
-      if (found !== -1) {
-        const cand = matches[found];
-        out.push({ group: cur.group || cand.group || 'TBD', players: cur.players.concat(cand.players) });
-        used[i] = used[found] = true;
-        continue;
-      }
-    }
-    if (!used[i]) { out.push(cur); used[i] = true; }
-  }
-  return out;
-}
-
-function includeWaitersIntoMatches(matches, allPlayers, prevMatches) {
-  const placed = new Set();
-  matches.forEach(m => (m.players || []).forEach(p => placed.add(p)));
-
-  const waited = allPlayers.filter(p => p.waited && !placed.has(p.name)).map(p => p.name);
-  if (!waited.length) return;
-
-  // Fill existing matches up to 4
-  for (let i = 0; i < waited.length; ) {
-    const w = waited[i];
-    let placedNow = false;
-    for (const m of matches) {
-      if ((m.players || []).length < 4) {
-        const wouldRepeat = (m.players || []).some(p => isRepeatPair([w, p], prevMatches));
-        if (!wouldRepeat && !placed.has(w)) {
-          m.players = (m.players || []).concat([w]);
-          placed.add(w);
-          placedNow = true;
-          break;
-        }
-      }
-    }
-    if (placedNow) waited.splice(i, 1); else i++;
-  }
-
-  // Remaining waited players become singletons (will be merged/refilled later)
-  for (const w of waited) {
-    if (!placed.has(w)) {
-      matches.push({ group: 'TBD', players: [w] });
-      placed.add(w);
-    }
-  }
-}
-
-function detectMatchGroupTag(players) {
-  const allPlayers = loadPlayers();
-  const groupSet = new Set();
-  for (const name of players) {
-    const p = allPlayers.find(x => x.name === name);
-    if (p && p.group) groupSet.add(p.group);
-  }
-  const groups = Array.from(groupSet).sort((a, b) => groupIndex(a) - groupIndex(b));
-  if (groups.length === 1) return groups[0];
-  if (groups.length === 2 && Math.abs(groupIndex(groups[0]) - groupIndex(groups[1])) === 1) {
-    return groups.join('+');
-  }
-  return 'Mixed';
-}
-
-// Part 3: Round generation with alternating rounds and special case
-function generateRoundAlternating(roundNumber) {
-  const players = loadPlayers().filter(p => p.waited);
-  const byGroup = {};
-  GROUP_ORDER.forEach(g => byGroup[g] = []);
-  for (const p of players) {
-    const g = GROUP_ORDER.includes(p.group) ? p.group : 'D';
-    byGroup[g].push(Object.assign({}, p));
-  }
-  for (const g of GROUP_ORDER) byGroup[g].sort((a, b) => a.rank - b.rank);
-
-  const prevMatches = loadRecentMatches(10);
-  const matches = [];
-
-  if (roundNumber % 2 === 1) {
-    // Odd rounds: same-group matches
-    for (const g of GROUP_ORDER) {
-      const groupMatches = nearestPairsWithinGroup(byGroup[g], prevMatches);
-      for (const m of groupMatches) matches.push({ group: g, players: m });
-    }
-  } else {
-    // Even rounds: mixed between adjacent groups
-    for (let gi = 0; gi < GROUP_ORDER.length - 1; gi++) {
-      const topG = GROUP_ORDER[gi];
-      const lowG = GROUP_ORDER[gi + 1];
-      const topPlayers = byGroup[topG];
-      const lowPlayers = byGroup[lowG];
-      if (topPlayers.length === 0 && lowPlayers.length === 0) continue;
-
-      // Special case: if top has exactly 3 players and lower has at least 1 -> 3A + top B
-      if (topG === 'A' && topPlayers.length === 3 && lowPlayers.length >= 1) {
-        const pickTop = topPlayers.slice().sort((a, b) => b.rank - a.rank).map(p => p.name);
-        const pickLow = lowPlayers.slice().sort((a, b) => a.rank - b.rank)[0].name;
-        matches.push({ group: topG + '+' + lowG, players: pickTop.concat([pickLow]) });
-        continue;
-      }
-
-      const { pairs, leftovers } = pickMixedBetweenGroups(topPlayers, lowPlayers, prevMatches);
-      for (const p of pairs) matches.push({ group: topG + '+' + lowG, players: p });
-      for (const l of leftovers) matches.push({ group: topG + '+' + lowG, players: l });
-    }
-  }
-
-  includeWaitersIntoMatches(matches, players, prevMatches);
-
-  // Merge adjacent pairs into 4-player matches so Team2 columns are filled
-  const merged = mergePairsIntoFour(matches);
-  return merged;
-}
-
-function generateRound(roundNumber) {
-  if (!roundNumber) roundNumber = getNextRoundNumber();
-  return generateRoundAlternating(roundNumber);
-}
-
-// Compute waiting counts and last-wait-round from history sheet
-function computeWaitStatsFromHistory() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_HISTORY);
-  const counts = {};
-  const lastRound = {};
-  if (!sh) return { counts, lastRound };
-  const rows = sh.getDataRange().getValues();
-  if (rows.length <= 1) return { counts, lastRound };
-
-  const header = rows[0].map(h => String(h || '').trim().toUpperCase());
-  let waitCol = header.findIndex(h => h === 'PLAYERS WAITING');
-  if (waitCol === -1) {
-    waitCol = header.findIndex(h => h.includes('MATCHPLAYERS') || h.includes('MATCH PLAYERS') || h.includes('PLAYERS'));
-  }
-  const roundCol = header.findIndex(h => h === 'ROUND');
-
-  for (let r = 1; r < rows.length; r++) {
-    const row = rows[r];
-    const roundVal = roundCol !== -1 ? Number(row[roundCol]) : r;
-    const waitCell = waitCol !== -1 ? String(row[waitCol] || '') : '';
-    const names = waitCell.split(',').map(s => s.trim()).filter(Boolean);
-    for (const n of names) {
-      counts[n] = (counts[n] || 0) + 1;
-      lastRound[n] = Math.max(lastRound[n] || 0, isNaN(roundVal) ? r : roundVal);
-    }
-  }
-  return { counts, lastRound };
-}
-
-// Choose fair leftovers up to neededCount using strict rotation (prefer highest wait counts)
-function chooseFairLeftovers(candidateNames, neededCount) {
-  const { counts, lastRound } = computeWaitStatsFromHistory();
-  const arr = candidateNames.map(name => ({
-    name,
-    count: counts[name] || 0,
-    last: lastRound[name] || 0
-  }));
-
-  const allActive = loadPlayers().filter(p => p.waited).map(p => p.name);
-  const allCounts = allActive.map(n => counts[n] || 0);
-  const globalMax = allCounts.length ? Math.max(...allCounts) : 0;
-
-  let eligible = arr.filter(a => a.count === globalMax);
-
-  if (eligible.length < neededCount) {
-    const remaining = arr
-      .filter(a => a.count < globalMax)
-      .sort((x, y) => y.count - x.count || x.last - y.last || x.name.localeCompare(y.name));
-    while (eligible.length < neededCount && remaining.length) eligible.push(remaining.shift());
-  }
-
-  eligible.sort((a, b) => a.last - b.last || a.name.localeCompare(b.name));
-  return eligible.slice(0, neededCount).map(e => e.name);
-}
-
-function getWaitingCounts() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_MATCHES);
-  if (!sh) return {};
-  const values = sh.getDataRange().getValues();
-  const counts = {};
-  for (let r = 0; r < values.length; r++) {
-    const row = values[r];
-    const waitingColIndex = row.findIndex(h => String(h).trim().toUpperCase() === 'PLAYERS WAITING');
-    if (waitingColIndex !== -1) {
-      const names = String(row[waitingColIndex] || '').split(',').map(s => s.trim()).filter(Boolean);
-      for (const n of names) counts[n] = (counts[n] || 0) + 1;
-    }
-  }
-  return counts;
-}
-
-// Part 4: Final assembly, recording, writing Matches, dedupe and UI
-
-function refillCourts(cleanedKept, allPlayers) {
-  const placed = new Set();
-  cleanedKept.forEach(m => (m.players || []).forEach(p => placed.add(p)));
-  const remaining = allPlayers.filter(n => !placed.has(n));
-  for (const m of cleanedKept) {
-    while ((m.players || []).length < 4 && remaining.length) {
-      m.players = (m.players || []).concat([remaining.shift()]);
-    }
-  }
-  return { cleanedKept, remainingLeft: remaining };
-}
-
-
-function assembleFinalMatchesAndLeftovers(rawMatches) {
-  const courts = getCourtsCount();
-  const allPlayers = loadPlayers().filter(p => p.waited).map(p => p.name);
-  if (!allPlayers.length) return { cleanedKept: [], finalLeftovers: [] };
-
-  // Authoritative wait stats for deterministic ordering
-  const { counts: waitCounts, lastRound: lastWait } = computeWaitStatsFromHistory();
-
-  // Order players: highest wait count first, then oldest last-wait, then name
-  const ordered = allPlayers.slice().map(name => ({
-    name,
-    count: waitCounts[name] || 0,
-    last: lastWait[name] || 0
-  })).sort((a, b) =>
-    b.count - a.count ||          // players who waited most are placed first
-    a.last - b.last ||            // then those who waited longest ago
-    a.name.localeCompare(b.name)  // finally alphabetical
-  ).map(x => x.name);
-
-  const cleanedKept = [];
-  let pool = ordered.slice();
-
-  // Strictly fill courts with 4 players each
-  for (let c = 0; c < courts; c++) {
-    if (pool.length >= 4) {
-      const chunk = pool.splice(0, 4);
-      cleanedKept.push({ group: 'TBD', players: chunk });
-    } else {
-      break; // not enough players left to form a full court
-    }
-  }
-
-  // Any remaining players are leftovers
-  const authoritativeLeftovers = pool.slice();
-
-  // If strict rotation enabled, pick leftovers fairly
-  const finalLeftovers = (ENFORCE_STRICT_WAIT_ROTATION && authoritativeLeftovers.length > 0)
-    ? chooseFairLeftovers(authoritativeLeftovers, authoritativeLeftovers.length)
-    : authoritativeLeftovers.slice();
-
-  return { cleanedKept, finalLeftovers };
-}
-
-function recordMatches(matches, roundNumber, finalLeftovers) {
-  const ss = SpreadsheetApp.getActive();
-  let sh = ss.getSheetByName(SHEET_HISTORY);
-  if (!sh) {
-    sh = ss.insertSheet(SHEET_HISTORY);
-    sh.appendRow(['Timestamp', 'MatchPlayers', 'Round', 'GroupTag', 'Players Waiting']);
-  }
-  const now = new Date();
-  for (const m of matches) {
-    sh.appendRow([
-      now,
-      (m.players || []).join(', '),
-      roundNumber,
-      m.group || '',
-      '' // Match rows don't record waiters
-    ]);
-  }
-
-  // Record leftovers as a single row to track who waited
-  if (finalLeftovers && finalLeftovers.length) {
-    sh.appendRow([
-      now,
-      '', // No match players
-      roundNumber,
-      '', // No group tag
-      finalLeftovers.join(', ')
-    ]);
-  }
-}
-
-function writeCurrentRoundSheet(matches, roundNumber) {
-  const ss = SpreadsheetApp.getActive();
-  let cr = ss.getSheetByName(SHEET_CURRENT);
-  if (!cr) cr = ss.insertSheet(SHEET_CURRENT);
-  cr.clear();
-  cr.appendRow(['Round', 'Group', 'Players']);
-  matches.forEach(m => cr.appendRow([roundNumber, m.group || '', (m.players || []).join(', ')]));
-}
-
-function writeMatchesSheetWithWaiters(matches, leftovers, roundNumber) {
-  const ss = SpreadsheetApp.getActive();
-  let sh = ss.getSheetByName(SHEET_MATCHES);
-  if (!sh) {
-    sh = ss.insertSheet(SHEET_MATCHES);
-    sh.appendRow(['Round', 'Court', 'Team1 P1', 'Team1 P2', 'Team2 P1', 'Team2 P2', 'Type', 'Score', 'Players Waiting']);
-  }
-
-  const headerRow = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
-  const blankRow = new Array(headerRow.length).fill('');
-
-  const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd MMM yyyy, HH:mm');
-  sh.appendRow(['Generated on ' + timestamp]);
-  sh.appendRow(blankRow);
-
-  let court = 1;
-  for (const m of matches) {
-    const players = (m.players || []).slice();
-    let t1p1 = '', t1p2 = '', t2p1 = '', t2p2 = '';
-    if (players.length >= 4) {
-      [t1p1, t1p2, t2p1, t2p2] = players.slice(0, 4);
-    } else if (players.length === 3) {
-      [t1p1, t1p2, t2p1] = players;
-    } else if (players.length === 2) {
-      [t1p1, t1p2] = players;
-    } else if (players.length === 1) {
-      [t1p1] = players;
-    }
-    const type = detectMatchGroupTag(players);
-    const score = '';
-    sh.appendRow([roundNumber, 'Court ' + court, t1p1, t1p2, t2p1, t2p2, type, score, '']);
-    court++;
-  }
-
-  if (leftovers && leftovers.length) {
-    const waitingText = Array.from(new Set(leftovers)).join(', ');
-    const waitingColIndex = headerRow.findIndex(h => String(h).trim().toUpperCase() === 'PLAYERS WAITING');
-    const row = new Array(headerRow.length).fill('');
-    if (waitingColIndex !== -1) {
-      row[waitingColIndex] = waitingText;
-      sh.appendRow(row);
-    } else {
-      row[row.length - 1] = waitingText;
-      sh.appendRow(row);
-    }
-  }
-}
-
-function getNextRoundNumber() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_HISTORY);
-  if (!sh) return 1;
-  const rows = sh.getDataRange().getValues();
-  if (rows.length <= 1) return 1;
-  const last = rows[rows.length - 1];
-  const lastRound = Number(last[2]);
-  return (isNaN(lastRound) ? rows.length : lastRound + 1);
-}
-
-// Orchestrator with logging
-function runGenerateRound() {
+// Structured logger (paste if not already present)
+function L(tag, msg, meta) {
   try {
-    const nextRound = getNextRoundNumber();
-    const players = loadPlayers();
-    const rawMatches = generateRound(nextRound);
-    const recentMatches = loadRecentMatches(10);
-    includeWaitersIntoMatches(rawMatches, players, recentMatches);
-    const merged = mergePairsIntoFour(rawMatches);
-
-    const assembly = assembleFinalMatchesAndLeftovers(merged);
-    const cleanedKept = assembly.cleanedKept || [];
-    const finalLeftovers = assembly.finalLeftovers || [];
-
-    // FIX: pass finalLeftovers into recordMatches
-    recordMatches(cleanedKept, nextRound, finalLeftovers);
-
-    writeCurrentRoundSheet(cleanedKept, nextRound);
-    writeMatchesSheetWithWaiters(cleanedKept, finalLeftovers, nextRound);
-
     const ss = SpreadsheetApp.getActive();
-    const sh = ss.getSheetByName(SHEET_MATCHES);
-    if (sh) ss.setActiveSheet(sh);
+    const tz = ss ? ss.getSpreadsheetTimeZone() : 'GMT';
+    const time = Utilities.formatDate(new Date(), tz, 'HH:mm:ss');
+    const metaText = (meta === undefined) ? '' : ' | ' + JSON.stringify(meta);
+    Logger.log('%s %s: %s%s', time, String(tag).toUpperCase(), String(msg), metaText);
+  } catch (e) {
+    try { Logger.log('LOGGER ERROR: %s', e && e.message); } catch (e2) {}
+  }
+}
 
+// Normalize Playing column values: only explicit yes/y/true/1 count as playing
+function isPlayingValue(v) {
+  try {
+    if (v === true) return true;
+    if (v === false || v === null || v === undefined) return false;
+    const s = String(v).trim().toLowerCase();
+    return s === 'yes' || s === 'y' || s === 'true' || s === '1';
+  } catch (e) {
+    L('PLAY ERR', 'isPlayingValue exception', { message: e && e.message });
+    return false;
+  }
+}
+
+// Tolerant loadPlayers: detects header variants and chooses best match for Playing column
+function loadPlayers() {
+  L('LOAD START', 'entering loadPlayers (tolerant)');
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const sheet = ss.getSheetByName('Players') || ss.getSheetByName('PLAYERS');
+    if (!sheet) {
+      L('LOAD INFO', 'Players sheet not found; returning empty array');
+      return [];
+    }
+
+    const data = sheet.getDataRange().getValues();
+    if (!data || data.length < 1) {
+      L('LOAD INFO', 'Players sheet empty; returning empty array');
+      return [];
+    }
+
+    const rawHeader = data[0].map(h => (h === undefined || h === null) ? '' : String(h).trim());
+    const header = rawHeader.map(h => h.toLowerCase());
+    L('LOAD INFO', 'raw header', { rawHeader });
+
+    // tolerant variants for each logical column
+    const nameVariants = ['player','name','player name','participant','participant name'];
+    const groupVariants = ['group','grp','group name'];
+    const playingVariants = ['playing','play','playing?','playing (yes/no)','playing (y/n)','playing (yes/no)'];
+    const groupLevelVariants = ['grouplevel','group level','level','group-level'];
+    const courtsCountVariants = ['courtscount','courts count','courts','courts_count'];
+
+    function findIndex(variants) {
+      // exact match first
+      for (let i = 0; i < header.length; i++) {
+        for (const v of variants) {
+          if (header[i] === v) return i;
+        }
+      }
+      // substring match
+      for (let i = 0; i < header.length; i++) {
+        for (const v of variants) {
+          if (header[i].indexOf(v) !== -1) return i;
+        }
+      }
+      // fuzzy: remove non-alphanum and compare
+      function norm(s){ return s.replace(/[^a-z0-9]/g,''); }
+      const normHeader = header.map(h => norm(h));
+      for (let i = 0; i < normHeader.length; i++) {
+        for (const v of variants) {
+          if (normHeader[i] === norm(v)) return i;
+        }
+      }
+      return -1;
+    }
+
+    const nameIdx = findIndex(nameVariants) !== -1 ? findIndex(nameVariants) : 0;
+    const groupIdx = findIndex(groupVariants);
+    const playingIdx = findIndex(playingVariants);
+    const groupLevelIdx = findIndex(groupLevelVariants);
+    const courtsCountIdx = findIndex(courtsCountVariants);
+
+    L('LOAD INFO', 'detected indexes (tolerant)', { nameIdx, groupIdx, playingIdx, groupLevelIdx, courtsCountIdx });
+
+    // If playingIdx still not found, attempt to detect a yes/no column by sampling columns
+    let finalPlayingIdx = playingIdx;
+    if (finalPlayingIdx === -1) {
+      const rowsToScan = Math.min(30, data.length - 1);
+      let bestIdx = -1;
+      let bestScore = 0;
+      for (let c = 0; c < data[0].length; c++) {
+        let score = 0;
+        for (let r = 1; r <= rowsToScan; r++) {
+          const v = data[r][c];
+          if (v === undefined || v === null) continue;
+          const s = String(v).trim().toLowerCase();
+          if (s === 'yes' || s === 'no' || s === 'y' || s === 'n' || s === 'true' || s === 'false' || s === '1' || s === '0') score++;
+        }
+        if (score > bestScore) { bestScore = score; bestIdx = c; }
+      }
+      if (bestScore >= Math.max(3, Math.floor(rowsToScan * 0.3))) {
+        finalPlayingIdx = bestIdx;
+        L('LOAD INFO', 'playing column inferred by yes/no prevalence', { finalPlayingIdx, bestScore, rowsScanned: rowsToScan });
+      } else {
+        L('LOAD WARN', 'could not reliably detect Playing column; will fallback to column index 2 if present', {});
+        finalPlayingIdx = (data[0].length > 2) ? 2 : -1;
+      }
+    } else {
+      L('LOAD INFO', 'playing header detected by tolerant match', { playingIdx: finalPlayingIdx });
+    }
+
+    const players = [];
+    for (let r = 1; r < data.length; r++) {
+      const row = data[r];
+      const raw = row.map(c => (c === undefined || c === null) ? '' : String(c));
+      const name = String(row[nameIdx] || '').trim();
+      if (!name) {
+        L('LOAD SKIP', 'skipping row with empty name', { row: r+1 });
+        continue;
+      }
+      const groupRaw = (groupIdx >= 0) ? row[groupIdx] : '';
+      const group = String(groupRaw || 'D').trim().toUpperCase();
+      const rawPlaying = (finalPlayingIdx >= 0) ? row[finalPlayingIdx] : '';
+      const playing = isPlayingValue(rawPlaying);
+      const groupLevel = (groupLevelIdx >= 0) ? (row[groupLevelIdx] || '') : '';
+      const courtsCount = (courtsCountIdx >= 0) ? Number(row[courtsCountIdx]) || null : null;
+
+      const p = { name, group, playing, groupLevel, courtsCount, raw };
+      players.push(p);
+
+      if (players.length <= 10) {
+        L('LOAD ROW', 'parsed player', { row: r+1, name, group, rawPlaying, playing });
+      } else if (players.length === 11) {
+        L('LOAD INFO', 'parsed >10 players; further rows summarized only', {});
+      }
+    }
+
+    L('LOAD END', 'loaded players', { count: players.length, playingDetectedColumn: finalPlayingIdx });
+    return players;
+  } catch (e) {
+    L('LOAD ERR', 'exception in tolerant loadPlayers', { message: e && e.message });
+    throw e;
+  }
+}
+
+// Full replacement: generateATeams with rank -> groupLevel -> sheetOrder tie-breakers
+// Full replacement: generateATeams using GroupLevel as primary rank
+// Full replacement: generateATeams with GroupLevel primary, waited-priority, randomized ties
+function generateATeams(players, courts) {
+  L('GEN A START', 'entering generateATeams (GroupLevel primary, waited-priority, randomized ties)', { playersCount: Array.isArray(players) ? players.length : 0, courts: courts });
+  try {
+    players = Array.isArray(players) ? players.slice() : [];
+    const maxMatches = Math.max(0, Math.floor(Number(courts) || 0));
+    L('GEN A INFO', 'computed maxMatches', { maxMatches });
+
+    // Helper: extract numeric wait score from player object or raw row
+    function getWaitScore(p) {
+      try {
+        // Common property names
+        const candidates = ['waited','waitCount','waitcount','wait','waiting','wait_score','waitscore'];
+        for (const k of candidates) {
+          if (p.hasOwnProperty(k)) {
+            const v = p[k];
+            if (v === true) return 1;
+            if (v === false || v === null || v === undefined) continue;
+            const n = Number(v);
+            if (!isNaN(n)) return Math.max(0, Math.floor(n));
+            const s = String(v).trim().toLowerCase();
+            if (s === 'yes' || s === 'y' || s === 'true') return 1;
+            if (s === 'no' || s === 'n' || s === 'false') return 0;
+          }
+        }
+        // If not found in properties, inspect raw row array (if present)
+        if (Array.isArray(p.raw)) {
+          for (let i = p.raw.length - 1; i >= 0; i--) {
+            const cell = p.raw[i];
+            if (cell === undefined || cell === null) continue;
+            const s = String(cell).trim();
+            if (s === '') continue;
+            const n = Number(s);
+            if (!isNaN(n)) return Math.max(0, Math.floor(n));
+            const sl = s.toLowerCase();
+            if (sl === 'yes' || sl === 'y' || sl === 'true') return 1;
+            if (sl === 'no' || sl === 'n' || sl === 'false') return 0;
+            // look for "wait" token followed by number e.g., "wait:2" or "waited 3"
+            const m = s.match(/wait(?:ed|ing)?\D*([0-9]+)/i);
+            if (m && m[1]) return Math.max(0, Math.floor(Number(m[1])));
+          }
+        }
+      } catch (e) {
+        L('GEN A WARN', 'getWaitScore error', { message: e && e.message, player: p && p.name });
+      }
+      return 0;
+    }
+
+    // Fisher-Yates shuffle for tie-randomization
+    function shuffleInPlace(arr) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+      }
+    }
+
+    // Build A players list with normalized groupLevel, waitScore and original index for stable tie-break fallback
+    const aPlayers = [];
+    for (let i = 0; i < players.length; i++) {
+      const p = players[i];
+      if (!p) continue;
+      if (String(p.group || '').toUpperCase() !== 'A') continue;
+      if (!p.playing) continue;
+      let gl = Number(p.groupLevel);
+      if (isNaN(gl)) gl = Number.MAX_SAFE_INTEGER;
+      const waitScore = getWaitScore(p);
+      aPlayers.push({ name: String(p.name), groupLevel: gl, waitScore: waitScore, sheetIndex: i, raw: p.raw || null });
+    }
+
+    L('GEN A INFO', 'filtered A players before sort', { aCount: aPlayers.length, aPlayers: aPlayers.map(p => ({ name: p.name, groupLevel: p.groupLevel, waitScore: p.waitScore, idx: p.sheetIndex })) });
+
+    // Group by groupLevel and waitScore to randomize ties
+    // First sort by groupLevel asc, waitScore desc (prefer higher waitScore), sheetIndex asc to create stable buckets
+    aPlayers.sort((x, y) => {
+      if (x.groupLevel !== y.groupLevel) return x.groupLevel - y.groupLevel;
+      if (x.waitScore !== y.waitScore) return y.waitScore - x.waitScore; // higher waitScore first
+      return x.sheetIndex - y.sheetIndex;
+    });
+
+    // Now identify contiguous tie blocks where groupLevel and waitScore are equal, and shuffle within each block
+    let i = 0;
+    while (i < aPlayers.length) {
+      let j = i + 1;
+      while (j < aPlayers.length && aPlayers[j].groupLevel === aPlayers[i].groupLevel && aPlayers[j].waitScore === aPlayers[i].waitScore) j++;
+      if (j - i > 1) {
+        const block = aPlayers.slice(i, j);
+        shuffleInPlace(block);
+        // replace back
+        for (let k = i; k < j; k++) aPlayers[k] = block[k - i];
+        L('GEN A INFO', 'randomized tie block', { groupLevel: aPlayers[i].groupLevel, waitScore: aPlayers[i].waitScore, names: aPlayers.slice(i, j).map(x => x.name) });
+      }
+      i = j;
+    }
+
+    L('GEN A INFO', 'final ordered A players', { aPlayers: aPlayers.map(p => ({ name: p.name, groupLevel: p.groupLevel, waitScore: p.waitScore, idx: p.sheetIndex })) });
+
+    const matches = [];
+    for (let m = 0; m < maxMatches && aPlayers.length > 0; m++) {
+      const take = Math.min(4, aPlayers.length);
+      const team = aPlayers.splice(0, take);
+      matches.push({ group: 'A', players: team.map(t => t.name), groupLevels: team.map(t => t.groupLevel), waitScores: team.map(t => t.waitScore) });
+      if (take === 4) {
+        L('GEN A TEAM', 'formed full team (GroupLevel primary, waited-priority)', { court: matches.length, players: team.map(t => t.name), groupLevels: team.map(t => t.groupLevel), waitScores: team.map(t => t.waitScore) });
+      } else {
+        L('GEN A TEAM', 'formed partial team (GroupLevel primary, waited-priority)', { court: matches.length, players: team.map(t => t.name), groupLevels: team.map(t => t.groupLevel), waitScores: team.map(t => t.waitScore) });
+      }
+    }
+
+    const leftovers = aPlayers.map(p => p.name);
+    L('GEN A END', 'exiting generateATeams', { matches: matches.length, leftovers });
+
+    // Return matches without internal arrays (players list only)
+    const outMatches = matches.map(m => ({ group: m.group, players: m.players }));
+    return { matches: outMatches, leftovers };
   } catch (err) {
-    Logger.log('runGenerateRound encountered an error: %s', err && err.message);
+    L('GEN A ERR', 'exception in generateATeams', { message: err && err.message });
     throw err;
   }
 }
 
-function resetHistoryAndRoundsWithConfirm() {
-  const ui = SpreadsheetApp.getUi();
-  const resp = ui.alert('Reset Match Data', 'This will clear the Match History, Current Round, and Matches sheets. Continue?', ui.ButtonSet.YES_NO);
-  if (resp !== ui.Button.YES) return;
-
-  const ss = SpreadsheetApp.getActive();
-  try { const sh = ss.getSheetByName(SHEET_HISTORY); if (sh) ss.deleteSheet(sh); } catch (e) {}
-  try { const cr = ss.getSheetByName(SHEET_CURRENT); if (cr) ss.deleteSheet(cr); } catch (e) {}
-  try { const ms = ss.getSheetByName(SHEET_MATCHES); if (ms) ss.deleteSheet(ms); } catch (e) {}
-
-  const newH = ss.insertSheet(SHEET_HISTORY);
-  newH.appendRow(['Timestamp', 'MatchPlayers', 'Round', 'GroupTag', 'Players Waiting']);
-
-  const newCR = ss.insertSheet(SHEET_CURRENT);
-  newCR.appendRow(['Round', 'Group', 'Players']);
-
-  const newM = ss.insertSheet(SHEET_MATCHES);
-  newM.appendRow(['Round', 'Court', 'Team1 P1', 'Team1 P2', 'Team2 P1', 'Team2 P2', 'Type', 'Score', 'Players Waiting']);
-
-  const playersSheet = ss.getSheetByName(SHEET_PLAYERS);
-  if (playersSheet) ss.setActiveSheet(playersSheet);
-}
-
-function onOpen() {
-  SpreadsheetApp.getUi().createMenu('Match Tools')
-    .addItem('Generate next round', 'runGenerateRound')
-    .addItem('Reset history and rounds', 'resetHistoryAndRoundsWithConfirm')
-    .addToUi();
-}
-
-function testCourtFillingStrict() {
-  const players = [
-    'Yogesh','Chandran','Chandu','Rajan',
-    'Navneet','Apurva','Gouri','Manish',
-    'Antilen(James)','Apeksha','Dinesh',
-    'Manoj','Raffi'
-  ];
-  const courts = 4;
-
-  const ordered = players.slice();
-  Logger.log('ORDERED: %s', JSON.stringify(ordered));
-
-  const cleanedKept = [];
-  let pool = ordered.slice();
-
-  // Strictly fill courts with 4 players each
-  for (let c = 0; c < courts; c++) {
-    if (pool.length >= 4) {
-      const chunk = pool.splice(0, 4);
-      cleanedKept.push({ players: chunk });
+// getCourtsCount: uses Settings!B1 override, else computes from Players with Playing=yes and Group=A
+// getCourtsCount: use the value in the first row under the header "CourtsCount"
+// Full replacement function — paste as-is. Uses L(...) for logging and loadPlayers() if available.
+function getCourtsCount() {
+  L('COURTS START', 'entering getCourtsCount (first-row CourtsCount)');
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const sheet = ss.getSheetByName('Players') || ss.getSheetByName('PLAYERS');
+    if (sheet) {
+      try {
+        const data = sheet.getDataRange().getValues();
+        if (data && data.length > 0) {
+          const header = data[0].map(h => (h === undefined || h === null) ? '' : String(h).trim().toLowerCase());
+          L('COURTS INFO', 'Players header detected', { header });
+          // find exact header index for CourtsCount (case-insensitive exact match)
+          let courtsIdx = -1;
+          for (let i = 0; i < header.length; i++) {
+            if (header[i] === 'courtscount') { courtsIdx = i; break; }
+          }
+          if (courtsIdx !== -1) {
+            // scan the first data row under header (row index 1 in data array)
+            // Use the very first non-empty cell under that column (row 2 in sheet)
+            let found = null;
+            for (let r = 1; r < data.length; r++) {
+              const raw = data[r][courtsIdx];
+              if (raw !== undefined && raw !== null && String(raw).toString().trim() !== '') {
+                found = raw;
+                L('COURTS INFO', 'found CourtsCount value in Players sheet', { row: r+1, raw: found });
+                break;
+              }
+            }
+            if (found !== null) {
+              const n = Number(found);
+              if (!isNaN(n) && n > 0) {
+                const out = Math.floor(n);
+                L('COURTS INFO', 'using CourtsCount from first non-empty row under header', { value: out });
+                return out;
+              } else {
+                L('COURTS WARN', 'CourtsCount value found but not a positive number', { raw: found });
+              }
+            } else {
+              L('COURTS INFO', 'CourtsCount header present but no non-empty value found under it');
+            }
+          } else {
+            L('COURTS INFO', 'CourtsCount header not found in Players header');
+          }
+        } else {
+          L('COURTS INFO', 'Players sheet has no rows');
+        }
+      } catch (e) {
+        L('COURTS ERR', 'error reading Players sheet CourtsCount column', { message: e && e.message });
+      }
     } else {
-      break; // not enough players left to form a full court
+      L('COURTS INFO', 'Players sheet not found when checking CourtsCount column');
     }
+  } catch (e) {
+    L('COURTS ERR', 'unexpected error while attempting to read Players sheet', { message: e && e.message });
   }
 
-  const leftovers = pool.slice();
+  // If we reach here, try Settings!B1 override (existing behavior)
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const settings = ss.getSheetByName('Settings') || ss.getSheetByName('SETTINGS');
+    if (settings) {
+      const v = settings.getRange(1, 2).getValue();
+      const n = Number(v);
+      if (!isNaN(n) && n > 0) {
+        L('COURTS INFO', 'using Settings!B1 override', { value: Math.floor(n) });
+        return Math.floor(n);
+      }
+      L('COURTS INFO', 'Settings!B1 present but not valid number', { raw: v });
+    }
+  } catch (e) {
+    L('COURTS ERR', 'reading Settings failed', { message: e && e.message });
+  }
 
-  Logger.log('CLEANED KEPT: %s', JSON.stringify(cleanedKept));
-  Logger.log('FINAL LEFTOVERS: %s', JSON.stringify(leftovers));
+  // Fallback: compute from loaded players (Playing = yes, Group = A)
+  try {
+    const players = (typeof loadPlayers === 'function') ? loadPlayers() : [];
+    if (!Array.isArray(players) || players.length === 0) {
+      L('COURTS INFO', 'no players loaded; fallback to 1 court');
+      return 1;
+    }
+    const playingA = players.filter(p => p && String(p.group || '').toUpperCase() === 'A' && !!p.playing).length;
+    const computed = Math.max(1, Math.ceil(playingA / 4));
+    L('COURTS INFO', 'computed from Players fallback', { playingA, computed });
+    return computed;
+  } catch (e) {
+    L('COURTS ERR', 'computing courts from players failed', { message: e && e.message });
+  }
+
+  L('COURTS END', 'final fallback to 1 court');
+  return 1;
 }
 
-function testRotationHarness() {
-  const players = [
-    'Yogesh','Chandran','Chandu','Rajan',
-    'Navneet','Apurva','Gouri','Manish',
-    'Antilen(James)','Apeksha','Dinesh',
-    'Manoj','Raffi'
-  ];
-  const courts = 4;
+// Orchestrator: loads players (using exact headers), computes courts, generates matches, writes sheet
+function runGenerateRound() {
+  L('RUN START', 'starting runGenerateRound (exact headers)');
+  const roundNumber = 1;
 
-  // Track wait counts
-  const waitCounts = {};
-  players.forEach(p => waitCounts[p] = 0);
+  let players = [];
+  try {
+    players = loadPlayers(); // our exact-header loader
+    L('RUN SRC', 'loadPlayers returned', { count: players.length });
+  } catch (e) {
+    L('RUN ERR', 'loadPlayers threw', { message: e && e.message });
+    players = [];
+  }
 
-  for (let round = 1; round <= 5; round++) {
-    // Order players: lowest wait count first, then name
-    const ordered = players.slice().sort((a, b) =>
-      waitCounts[b] - waitCounts[a] || a.localeCompare(b)
-    );
+  const courts = getCourtsCount();
+  L('RUN INFO', 'using courts', { courts });
 
-    const kept = [];
-    let pool = ordered.slice();
+  let result = { matches: [], leftovers: [] };
+  try {
+    result = generateATeams(players, courts) || result;
+    L('RUN INFO', 'generator returned', { matches: (result.matches || []).length, leftovers: (result.leftovers || []).length });
+  } catch (e) {
+    L('RUN ERR', 'generateATeams threw', { message: e && e.message });
+    throw e;
+  }
 
-    // Strictly fill courts with 4 players each
-    for (let c = 0; c < courts; c++) {
-      if (pool.length >= 4) {
-        const chunk = pool.splice(0, 4);
-        kept.push(chunk);
-      } else {
-        break;
+  try {
+    if (typeof writeMatchesSheetWithWaiters === 'function') {
+      writeMatchesSheetWithWaiters(result.matches || [], result.leftovers || [], roundNumber);
+      L('RUN INFO', 'wrote matches via writer', { matches: (result.matches || []).length });
+    } else {
+      L('RUN WARN', 'writeMatchesSheetWithWaiters not found; matches not written', { matches: (result.matches || []).length });
+    }
+  } catch (e) {
+    L('RUN ERR', 'writer threw', { message: e && e.message });
+    throw e;
+  }
+
+  L('RUN END', 'runGenerateRound complete', { matches: (result.matches || []).length, leftovers: (result.leftovers || []).length });
+  return { roundNumber, matches: result.matches || [], leftovers: result.leftovers || [] };
+}
+
+// Safe writer: writes Matches sheet header, timestamp, matches, and Players Waiting cell
+function writeMatchesSheetWithWaiters(matches, leftovers, roundNumber) {
+  L('WRITE START', 'entering writeMatchesSheetWithWaiters', { matches: matches.length, leftovers: leftovers.length, round: roundNumber });
+  try {
+    const ss = SpreadsheetApp.getActive();
+    let sheet = ss.getSheetByName('Matches');
+    if (!sheet) sheet = ss.insertSheet('Matches');
+
+    const header = ['Round','Court','Team1 P1','Team1 P2','Team2 P1','Team2 P2','Type','Score','Players Waiting'];
+    sheet.getRange(1,1,1,header.length).setValues([header]);
+
+    const nowText = 'Generated on ' + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone() || 'GMT', 'dd MMM yyyy, HH:mm');
+    sheet.getRange(2,1).setValue(nowText);
+
+    const maxRowsToClear = Math.max(100, matches.length + 10);
+    sheet.getRange(3,1,maxRowsToClear, header.length).clearContent();
+
+    const rows = [];
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i];
+      const courtLabel = 'Court ' + (i + 1);
+      const p = (m.players || []).slice(0,4);
+      const team1p1 = p[0] || '';
+      const team1p2 = p[1] || '';
+      const team2p1 = p[2] || '';
+      const team2p2 = p[3] || '';
+      const type = m.group || 'A';
+      rows.push([roundNumber, courtLabel, team1p1, team1p2, team2p1, team2p2, type, '', '']);
+    }
+
+    if (rows.length > 0) sheet.getRange(3,1,rows.length, header.length).setValues(rows);
+
+    const waitingStartRow = 3 + Math.max(0, rows.length);
+    if (leftovers && leftovers.length > 0) {
+      sheet.getRange(waitingStartRow, 9).setValue(leftovers.join(', '));
+      L('WRITE INFO', 'wrote leftovers', { row: waitingStartRow, count: leftovers.length });
+    } else {
+      sheet.getRange(waitingStartRow, 9).clearContent();
+      L('WRITE INFO', 'no leftovers to write', {});
+    }
+
+    L('WRITE END', 'writeMatchesSheetWithWaiters complete', { rowsWritten: rows.length });
+  } catch (e) {
+    L('WRITE ERR', 'exception in writer', { message: e && e.message });
+    throw e;
+  }
+}
+
+function listPlayingPlayers() {
+  L('DIAG START', 'entering listPlayingPlayers');
+  try {
+    const players = (typeof loadPlayers === 'function') ? loadPlayers() : [];
+    L('DIAG INFO', 'players loaded for diagnostic', { totalLoaded: players.length });
+
+    const byGroup = {};
+    for (let i = 0; i < players.length; i++) {
+      const p = players[i];
+      if (!p) continue;
+      if (!p.playing) continue;
+      const g = String(p.group || 'D').toUpperCase();
+      if (!byGroup[g]) byGroup[g] = [];
+      byGroup[g].push({ name: p.name, rowRaw: p.raw });
+    }
+
+    const groups = Object.keys(byGroup).sort();
+    if (groups.length === 0) {
+      L('DIAG INFO', 'no players with Playing = yes found');
+    } else {
+      L('DIAG INFO', 'players with Playing = yes by group', { groups: groups });
+      for (const g of groups) {
+        const list = byGroup[g].map(x => x.name);
+        L('DIAG GROUP', 'group summary', { group: g, count: list.length, names: list });
+        for (let i = 0; i < Math.min(10, byGroup[g].length); i++) {
+          L('DIAG ROW', 'raw row for player', { group: g, name: byGroup[g][i].name, raw: byGroup[g][i].rowRaw });
+        }
       }
     }
 
-    const leftovers = pool.slice();
-    leftovers.forEach(p => waitCounts[p]++);
-
-    Logger.log('Round %s:', round);
-    kept.forEach((court, i) => Logger.log(' Court %s: %s', i+1, court.join(', ')));
-    Logger.log(' Waiting: %s', leftovers.join(', '));
-    Logger.log(' WaitCounts: %s', JSON.stringify(waitCounts));
+    L('DIAG END', 'listPlayingPlayers complete', { groupsCount: groups.length });
+    return byGroup;
+  } catch (e) {
+    L('DIAG ERR', 'exception in listPlayingPlayers', { message: e && e.message });
+    throw e;
   }
 }
-
